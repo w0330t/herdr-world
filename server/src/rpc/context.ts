@@ -63,7 +63,6 @@ export type RpcServices = {
   publishWorldInvalidation(
     connectionId: string,
     connectionGeneration: number,
-    observedLate?: boolean,
   ): void;
   safeSend(
     ws: Socket,

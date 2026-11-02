@@ -125,6 +125,7 @@ type HostWork<Runtime> = {
   lease: RuntimeLease<Runtime>;
   priorities: readonly WorldSnapshotPriority[];
   invalidationVersion: number;
+  activityVersion: number;
   selected: boolean;
   state: "queued" | "running";
   late: boolean;
@@ -326,6 +327,7 @@ export class WorldSnapshotService<Runtime extends RuntimeWithHerdr> {
     Map<string, WorldSnapshot>
   >();
   private readonly invalidationVersions = new Map<string, number>();
+  private readonly activityVersions = new Map<string, number>();
   private readonly workByConnection = new Map<string, HostWork<Runtime>>();
   private readonly queue: HostWork<Runtime>[] = [];
   private readonly lateInvalidations = new Map<string, number>();
@@ -356,16 +358,19 @@ export class WorldSnapshotService<Runtime extends RuntimeWithHerdr> {
     this.observation = new WorldObservation(incarnation);
   }
 
-  invalidate(connectionId?: string): number {
+  /**
+   * `activity` marks the cache dirty without voiding a read in flight: the event
+   * changed only what an admitted observation may briefly lag (a repainting
+   * terminal's title), never topology. `late` only advances the revision.
+   */
+  invalidate(connectionId?: string, scope?: "late" | "activity"): number {
     this.revision += 1;
-    if (connectionId) {
-      this.invalidationVersions.set(
-        connectionId,
-        (this.invalidationVersions.get(connectionId) ?? 0) + 1,
-      );
-      const cached = this.cache.get(connectionId);
-      if (cached) cached.dirty = true;
-    }
+    if (!connectionId || scope === "late") return this.revision;
+    const versions =
+      scope === "activity" ? this.activityVersions : this.invalidationVersions;
+    versions.set(connectionId, (versions.get(connectionId) ?? 0) + 1);
+    const cached = this.cache.get(connectionId);
+    if (cached) cached.dirty = true;
     return this.revision;
   }
 
@@ -401,6 +406,9 @@ export class WorldSnapshotService<Runtime extends RuntimeWithHerdr> {
       if (!managedIds.has(invalidatedId)) {
         this.invalidationVersions.delete(invalidatedId);
       }
+    }
+    for (const activeId of this.activityVersions.keys()) {
+      if (!managedIds.has(activeId)) this.activityVersions.delete(activeId);
     }
     const rotate = (group: typeof statuses, cursor: number) => {
       const offset = group.length ? cursor % group.length : 0;
@@ -561,6 +569,7 @@ export class WorldSnapshotService<Runtime extends RuntimeWithHerdr> {
       lease,
       priorities,
       invalidationVersion: this.invalidationVersions.get(status.id) ?? 0,
+      activityVersion: this.activityVersions.get(status.id) ?? 0,
       selected,
       state: "queued",
       late: false,
@@ -647,7 +656,9 @@ export class WorldSnapshotService<Runtime extends RuntimeWithHerdr> {
           priorityKey: priorityKey(work.status.id, work.priorities),
           watchRevision: this.watchlist().revision,
           freshUntil: this.now() + SNAPSHOT_FRESH_MS,
-          dirty: this.wasInvalidatedSinceStart(work),
+          dirty:
+            this.wasInvalidatedSinceStart(work) ||
+            this.activitySinceStart(work),
         });
         if (!this.wasInvalidatedSinceStart(work)) {
           observation.complete(this.onCompleteObservation, work.lease, raw[2]);
@@ -694,6 +705,12 @@ export class WorldSnapshotService<Runtime extends RuntimeWithHerdr> {
     return (
       (this.invalidationVersions.get(work.status.id) ?? 0) !==
       work.invalidationVersion
+    );
+  }
+
+  private activitySinceStart(work: HostWork<Runtime>) {
+    return (
+      (this.activityVersions.get(work.status.id) ?? 0) !== work.activityVersion
     );
   }
 

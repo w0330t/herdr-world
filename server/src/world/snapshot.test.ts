@@ -1851,4 +1851,75 @@ describe("WorldSnapshotService", () => {
       snapshot_error: "connection changed during snapshot",
     });
   });
+
+  test("admits a read whose host only reported activity while in flight", async () => {
+    const release = deferred<void>();
+    let calls = 0;
+    const service = new WorldSnapshotService<Runtime>({
+      list: () => [status("local")],
+      readyRuntimeLease: () => ({
+        connectionId: "local",
+        generation: 1,
+        runtime: {
+          herdr: {
+            async call(method) {
+              calls += 1;
+              if (calls <= 4) await release.promise;
+              return runtime("Current").herdr.call(method);
+            },
+          },
+        },
+        isCurrent: () => true,
+      }),
+    });
+    const first = service.snapshot();
+    service.invalidate("local", "activity");
+    release.resolve();
+    const admitted = await first;
+    expect(admitted.connections[0]).toMatchObject({
+      stale: false,
+      actionable: true,
+    });
+    expect(admitted.connections[0].snapshot_error).toBeUndefined();
+    const refreshed = await service.snapshot();
+    expect(refreshed.connections[0].actionable).toBe(true);
+    expect(calls).toBe(8);
+    service.invalidate("local", "activity");
+    const again = await service.snapshot();
+    expect(again.connections[0].actionable).toBe(true);
+    expect(calls).toBe(12);
+  });
+
+  test("activity does not mask a hard invalidation in the same read", async () => {
+    const release = deferred<void>();
+    let calls = 0;
+    const service = new WorldSnapshotService<Runtime>({
+      list: () => [status("local")],
+      readyRuntimeLease: () => ({
+        connectionId: "local",
+        generation: 1,
+        runtime: {
+          herdr: {
+            async call(method) {
+              calls += 1;
+              if (calls <= 4) await release.promise;
+              return runtime("Current").herdr.call(method);
+            },
+          },
+        },
+        isCurrent: () => true,
+      }),
+    });
+    const first = service.snapshot();
+    service.invalidate("local", "activity");
+    service.invalidate("local");
+    release.resolve();
+    const uncertain = await first;
+    expect(uncertain.connections[0]).toMatchObject({
+      stale: true,
+      actionable: false,
+      snapshot_error: "observation changed during snapshot",
+    });
+    expect(calls).toBe(4);
+  });
 });
